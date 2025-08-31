@@ -1,0 +1,292 @@
+name: SonarQube Analysis with Auto Project Creation
+
+on:
+  workflow_call:
+    inputs:
+      sonarqube_url:
+        description: "SonarQube server URL"
+        required: true
+        type: string
+      sonarqube_project_key:
+        description: "SonarQube project key (optional, will use repository name if not provided)"
+        required: false
+        type: string
+        default: ""
+      java_version:
+        description: "Java version for SonarQube scanner (auto-detected if not specified)"
+        required: false
+        type: string
+        default: "17"
+      node_version:
+        description: "Node.js version (auto-detected if not specified)"
+        required: false
+        type: string
+        default: "18"
+      python_version:
+        description: "Python version (auto-detected if not specified)"
+        required: false
+        type: string
+        default: "3.11"
+    secrets:
+      SONARQUBE_TOKEN:
+        description: "SonarQube authentication token"
+        required: true
+
+jobs:
+  sonarqube-analysis:
+    name: SonarQube Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Shallow clones should be disabled for better analysis
+
+      - name: Setup Java (if needed)
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java_version }}
+          distribution: "temurin"
+        if: hashFiles('**/*.java') != '' || hashFiles('pom.xml') != '' || hashFiles('build.gradle') != '' || hashFiles('build.gradle.kts') != ''
+
+      - name: Setup Java 17 for SonarQube Scanner
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+
+      - name: Setup Node.js (if needed)
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+        if: hashFiles('**/*.js') != '' || hashFiles('**/*.ts') != '' || hashFiles('**/*.jsx') != '' || hashFiles('**/*.tsx') != '' || hashFiles('package.json') != ''
+
+      - name: Setup Python (if needed)
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ inputs.python_version }}
+        if: hashFiles('**/*.py') != '' || hashFiles('requirements.txt') != '' || hashFiles('pyproject.toml') != '' || hashFiles('setup.py') != ''
+
+      - name: Parse repository information
+        id: parse_repo
+        run: |
+          REPO_NAME="${{ github.repository }}"
+          REPO_NAME_ONLY="${REPO_NAME#*/}"
+          echo "Repository name: $REPO_NAME_ONLY"
+
+          # Extract components using regex
+          # Format: [year]-[semester]-S[section]-Grupo[team]-[additional_name]
+          if [[ $REPO_NAME_ONLY =~ ^([0-9]{4})-([12])-S([0-9]+)-Grupo([0-9]+)-(.+)$ ]]; then
+            YEAR="${BASH_REMATCH[1]}"
+            SEMESTER="${BASH_REMATCH[2]}"
+            SECTION="${BASH_REMATCH[3]}"
+            GROUP="${BASH_REMATCH[4]}"
+            ADDITIONAL_NAME="${BASH_REMATCH[5]}"
+            
+            echo "Parsed components:"
+            echo "Year: $YEAR"
+            echo "Semester: $SEMESTER"
+            echo "Section: $SECTION"
+            echo "Group: $GROUP"
+            echo "Additional Name: $ADDITIONAL_NAME"
+            
+            # Generate tags
+            TAG1="${YEAR}-${SEMESTER}"
+            TAG2="${YEAR}-${SEMESTER}-S${SECTION}"
+            TAG3="${YEAR}-${SEMESTER}-S${SECTION}-Grupo${GROUP}"
+            
+            echo "Generated tags:"
+            echo "Tag 1: $TAG1"
+            echo "Tag 2: $TAG2"
+            echo "Tag 3: $TAG3"
+            
+            # Set outputs
+            echo "year=$YEAR" >> $GITHUB_OUTPUT
+            echo "semester=$SEMESTER" >> $GITHUB_OUTPUT
+            echo "section=$SECTION" >> $GITHUB_OUTPUT
+            echo "group=$GROUP" >> $GITHUB_OUTPUT
+            echo "additional_name=$ADDITIONAL_NAME" >> $GITHUB_OUTPUT
+            echo "tag1=$TAG1" >> $GITHUB_OUTPUT
+            echo "tag2=$TAG2" >> $GITHUB_OUTPUT
+            echo "tag3=$TAG3" >> $GITHUB_OUTPUT
+            echo "valid_format=true" >> $GITHUB_OUTPUT
+            echo "project_key=${REPO_NAME_ONLY}" >> $GITHUB_OUTPUT
+            echo "project_name=${REPO_NAME_ONLY}" >> $GITHUB_OUTPUT
+          else
+            echo "Repository name does not match expected format: [year]-[semester]-S[section]-Grupo[group]-[name]"
+            echo "valid_format=false" >> $GITHUB_OUTPUT
+            echo "project_key=${REPO_NAME_ONLY}" >> $GITHUB_OUTPUT
+            echo "project_name=${REPO_NAME_ONLY}" >> $GITHUB_OUTPUT
+            echo "tag1=" >> $GITHUB_OUTPUT
+            echo "tag2=" >> $GITHUB_OUTPUT
+            echo "tag3=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check if SonarQube project exists
+        id: check_project
+        run: |
+          PROJECT_KEY="${{ inputs.sonarqube_project_key || steps.parse_repo.outputs.project_key }}"
+
+          echo "Checking if project '$PROJECT_KEY' exists in SonarQube..."
+
+          # Check if project exists using SonarQube Web API
+          RESPONSE=$(curl -s -w "%{http_code}" -u "${{ secrets.SONARQUBE_TOKEN }}:" \
+            "${{ inputs.sonarqube_url }}/api/projects/search?projects=$PROJECT_KEY" \
+            -o response.json)
+
+          HTTP_CODE=${RESPONSE: -3}
+          echo "HTTP response code: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            PROJECT_COUNT=$(jq -r '.components | length' response.json)
+            echo "Projects found: $PROJECT_COUNT"
+            
+            if [ "$PROJECT_COUNT" -gt 0 ]; then
+              echo "project_exists=true" >> $GITHUB_OUTPUT
+              echo "Project already exists"
+            else
+              echo "project_exists=false" >> $GITHUB_OUTPUT
+              echo "Project does not exist"
+            fi
+          else
+            echo "project_exists=false" >> $GITHUB_OUTPUT
+            echo "Error checking project or project does not exist"
+            cat response.json || true
+          fi
+
+          echo "project_key=$PROJECT_KEY" >> $GITHUB_OUTPUT
+          rm -f response.json
+
+      - name: Create SonarQube project
+        if: steps.check_project.outputs.project_exists == 'false'
+        run: |
+          PROJECT_KEY="${{ steps.check_project.outputs.project_key }}"
+          PROJECT_NAME="${{ steps.parse_repo.outputs.project_name }}"
+
+          echo "Creating SonarQube project: $PROJECT_KEY"
+
+          # Create project using SonarQube Web API
+          curl -X POST \
+            -u "${{ secrets.SONARQUBE_TOKEN }}:" \
+            "${{ inputs.sonarqube_url }}/api/projects/create" \
+            -d "project=$PROJECT_KEY" \
+            -d "name=$PROJECT_NAME"
+
+          echo "Project created successfully"
+
+      - name: Set project tags
+        if: steps.parse_repo.outputs.valid_format == 'true'
+        run: |
+          PROJECT_KEY="${{ steps.check_project.outputs.project_key }}"
+
+          echo "Setting tags for project: $PROJECT_KEY"
+
+          # Prepare tags array
+          TAGS="${{ steps.parse_repo.outputs.tag1 }},${{ steps.parse_repo.outputs.tag2 }},${{ steps.parse_repo.outputs.tag3 }}"
+
+          echo "Tags to set: $TAGS"
+
+          # Set tags using SonarQube Web API
+          curl -X POST \
+            -u "${{ secrets.SONARQUBE_TOKEN }}:" \
+            "${{ inputs.sonarqube_url }}/api/project_tags/set" \
+            -d "project=$PROJECT_KEY" \
+            -d "tags=$TAGS"
+
+          echo "Tags set successfully"
+
+      - name: Cache SonarQube packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      - name: Install SonarQube Scanner
+        run: |
+          wget -q https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-5.0.1.3006-linux.zip
+          unzip -q sonar-scanner-cli-5.0.1.3006-linux.zip
+          sudo mv sonar-scanner-5.0.1.3006-linux /opt/sonar-scanner
+          sudo ln -s /opt/sonar-scanner/bin/sonar-scanner /usr/local/bin/sonar-scanner
+
+      - name: Run SonarQube Scanner
+        env:
+          SONAR_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
+          SONAR_HOST_URL: ${{ inputs.sonarqube_url }}
+        run: |
+          sonar-scanner \
+            -Dsonar.projectKey="${{ steps.check_project.outputs.project_key }}" \
+            -Dsonar.projectName="${{ steps.parse_repo.outputs.project_name }}" \
+            -Dsonar.sources=. \
+            -Dsonar.host.url="${{ inputs.sonarqube_url }}" \
+            -Dsonar.login="${{ secrets.SONARQUBE_TOKEN }}" \
+            -Dsonar.projectVersion="${{ github.sha }}" \
+            -Dsonar.exclusions="**/node_modules/**,**/target/**,**/*.class,**/*.jar,**/.git/**,**/__pycache__/**,**/*.pyc,**/venv/**,**/.venv/**,**/env/**,**/.env/**,**/build/**,**/dist/**,**/*.egg-info/**,**/coverage/**,**/migrations/**,**/.pytest_cache/**,**/htmlcov/**" \
+            -Dsonar.test.inclusions="**/test/**,**/tests/**,**/*_test.py,**/*_test.java,**/*_test.js,**/*_test.ts,**/spec/**,**/*.spec.js,**/*.spec.ts,**/*.test.js,**/*.test.ts" \
+            -Dsonar.coverage.exclusions="**/test/**,**/tests/**,**/*_test.*,**/spec/**,**/*.spec.*,**/*.test.*,**/migrations/**,**/manage.py,**/settings.py,**/urls.py,**/wsgi.py,**/asgi.py" \
+            -Dsonar.python.coverage.reportPaths="coverage.xml,**/coverage.xml" \
+            -Dsonar.javascript.lcov.reportPaths="coverage/lcov.info,**/coverage/lcov.info" \
+            -Dsonar.java.coveragePlugin="jacoco" \
+            -Dsonar.coverage.jacoco.xmlReportPaths="target/site/jacoco/jacoco.xml,**/jacoco.xml" \
+            -Dsonar.scm.provider="git"
+
+      - name: Check Quality Gate Status (Informational Only)
+        continue-on-error: true
+        run: |
+          echo "Waiting for Quality Gate results..."
+          sleep 30
+
+          # Get project status (for information only - won't fail workflow)
+          QUALITY_GATE_STATUS=$(curl -s -u "${{ secrets.SONARQUBE_TOKEN }}:" \
+            "${{ inputs.sonarqube_url }}/api/qualitygates/project_status?projectKey=${{ steps.check_project.outputs.project_key }}" \
+            | jq -r '.projectStatus.status' 2>/dev/null || echo "UNKNOWN")
+
+          echo ""
+          echo "📊 Quality Gate Status: $QUALITY_GATE_STATUS"
+          echo ""
+
+          case "$QUALITY_GATE_STATUS" in
+            "OK")
+              echo "✅ Quality Gate: Passed - Great code quality!"
+              ;;
+            "ERROR")
+              echo "⚠️ Quality Gate: Failed - Check SonarQube for improvement suggestions"
+              echo "📝 This is informational only - workflow continues normally"
+              ;;
+            "WARN")
+              echo "⚠️ Quality Gate: Warning - Some issues detected"
+              echo "📝 This is informational only - workflow continues normally"
+              ;;
+            *)
+              echo "📊 Quality Gate: Status pending or unknown"
+              echo "📝 Analysis may still be processing"
+              ;;
+          esac
+
+          echo ""
+          echo "🔗 View detailed results at: ${{ inputs.sonarqube_url }}/dashboard?id=${{ steps.check_project.outputs.project_key }}"
+
+      - name: Display analysis summary
+        run: |
+          echo "✅ SonarQube analysis completed successfully!"
+          echo ""
+          echo "📊 Analysis Summary:"
+          echo "Repository: ${{ github.repository }}"
+          echo "Project Key: ${{ steps.check_project.outputs.project_key }}"
+          echo "SonarQube URL: ${{ inputs.sonarqube_url }}"
+          echo ""
+          echo "📝 Note: This analysis is for information and improvement guidance only."
+          echo "🚀 Code quality issues do not block merges - they help you improve!"
+          echo ""
+          if [ "${{ steps.parse_repo.outputs.valid_format }}" = "true" ]; then
+            echo "🏷️ Applied Tags:"
+            echo "• ${{ steps.parse_repo.outputs.tag1 }} (Year-Semester)"
+            echo "• ${{ steps.parse_repo.outputs.tag2 }} (Year-Semester-Section)"
+            echo "• ${{ steps.parse_repo.outputs.tag3 }} (Year-Semester-Section-Group)"
+          else
+            echo "⚠️ Repository name doesn't match expected format - no tags applied"
+            echo "Expected format: [year]-[semester]-S[section]-Grupo[group]-[name]"
+          fi
+          echo ""
+          echo "🔍 View detailed analysis: ${{ inputs.sonarqube_url }}/dashboard?id=${{ steps.check_project.outputs.project_key }}"

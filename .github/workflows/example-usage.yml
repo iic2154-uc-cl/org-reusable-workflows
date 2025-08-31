@@ -1,0 +1,15 @@
+name: Code Quality Analysis
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  sonarqube-analysis:
+    name: SonarQube Analysis
+    uses: iic2154-uc-cl/org-reusable-workflows/.github/workflows/sonarqube-analysis.yml@main
+    with:
+      sonarqube_url: ${{ vars.SONARQUBE_URL }}
+    secrets:
+      SONARQUBE_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
