@@ -32,7 +32,7 @@ Use the included `setup.sh` script to automatically deploy workflows across mult
 #### Prerequisites
 
 - **Required Tools**: `git`, `jq`, GitHub authentication (GitHub CLI or git credentials)
-- **Required Files**: `repos.json` with repository names, SonarQube token configured in each repository
+- **Required Files**: `repos.json` with repository names, SonarQube URL variable and token secret configured (organization or repository level)
 
 #### Steps
 
@@ -47,11 +47,26 @@ Use the included `setup.sh` script to automatically deploy workflows across mult
    ]
    ```
 
-2. **Set Up SonarQube Token**:
+2. **Set Up SonarQube Configuration**:
+
+   **SonarQube Server URL (Organization Variable)**
+
+   - Go to your organization's **Settings > Secrets and variables > Actions**
+   - Switch to the **Variables** tab
+   - Add organization variable named `SONARQUBE_URL` with your server URL (e.g., `https://sonarqube.ing.puc.cl`)
+   - Configure repository access (all repositories or selected repositories)
+
+   **SonarQube Token (Organization Secret)**
 
    - Generate a user token in your SonarQube server (User > My Account > Security)
-   - Add `SONARQUBE_TOKEN` secret to each repository (Settings > Secrets and variables > Actions)
    - Token must have project creation permissions
+   - In the same organization settings page, switch to **Secrets** tab
+   - Add organization secret named `SONARQUBE_TOKEN`
+   - Configure repository access (all repositories or selected repositories)
+
+   **Alternative: Individual Repository Setup**
+
+   - Add both `SONARQUBE_URL` variable and `SONARQUBE_TOKEN` secret to each repository individually
 
 3. **Run Bulk Deployment**:
 
@@ -78,17 +93,10 @@ Use the included `setup.sh` script to automatically deploy workflows across mult
 
 For individual repository setup, create `.github/workflows/sonarqube-analysis.yml` manually and configure the workflow to use this reusable workflow.
 
-## ⚙️ Configuration Parameters
+## ⚙️ GitHub Organization Configuration Parameters
 
-| Parameter               | Required | Default         | Description                                      |
-| ----------------------- | -------- | --------------- | ------------------------------------------------ |
-| `sonarqube_url`         | ✅ Yes   | -               | URL of your SonarQube server                     |
-| `sonarqube_project_key` | ❌ No    | Repository name | Custom project key for SonarQube                 |
-| `java_version`          | ❌ No    | `17`            | Java version (auto-detected if not specified)    |
-| `node_version`          | ❌ No    | `18`            | Node.js version (auto-detected if not specified) |
-| `python_version`        | ❌ No    | `3.11`          | Python version (auto-detected if not specified)  |
-
-**Required Secret**: `SONARQUBE_TOKEN` - SonarQube authentication token
+- **Variable**: `SONARQUBE_URL` - SonarQube server URL (organization or repository variable)
+- **Secret**: `SONARQUBE_TOKEN` - SonarQube authentication token (organization or repository secret)
 
 ## 🔄 Workflow Process
 
@@ -97,6 +105,33 @@ For individual repository setup, create `.github/workflows/sonarqube-analysis.ym
 3. **Language Detection**: Automatically detects Java, Python, JavaScript/TypeScript projects
 4. **Code Analysis**: Runs comprehensive quality analysis with proper exclusions
 5. **Quality Gate**: Reports results without failing the workflow (informational only)
+
+## ⚡ When Analysis Runs
+
+**Analysis Triggers:**
+
+- ✅ **Push to `main` branch** - Every commit to main triggers analysis
+- ✅ **Merged Pull Requests** - When PRs are merged to main, analysis runs automatically
+- ❌ **Feature branch commits** - Only main branch commits are analyzed
+- ❌ **Draft or open PRs** - No analysis on non-main branches
+
+## 🏷️ Automatic Project Tagging
+
+For repositories following the naming convention `[year]-[semester]-S[section]-Grupo[group]-[project_name]`, the workflow automatically creates these SonarQube project tags:
+
+| Tag Level           | Format                                      | Example            | Purpose                          |
+| ------------------- | ------------------------------------------- | ------------------ | -------------------------------- |
+| **Academic Period** | `[year]-[semester]`                         | `2025-1`           | Groups all projects by semester  |
+| **Course Section**  | `[year]-[semester]-S[section]`              | `2025-1-S3`        | Groups projects by class section |
+| **Team Group**      | `[year]-[semester]-S[section]-Grupo[group]` | `2025-1-S3-Grupo3` | Groups projects by team          |
+
+**Example**: Repository `2025-1-S3-Grupo3-Final-Project` gets tagged with:
+
+- `2025-1` (all first semester 2025 projects)
+- `2025-1-S3` (all section 3 projects)
+- `2025-1-S3-Grupo3` (all team 3 projects)
+
+⚠️ **Note**: If repository name doesn't match the expected format, no automatic tags are applied.
 
 ## 🔍 Automatic Language Support
 
